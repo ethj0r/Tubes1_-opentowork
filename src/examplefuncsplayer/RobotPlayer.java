@@ -75,7 +75,7 @@ public class RobotPlayer {
                 switch (rc.getType()){
                     case SOLDIER: runSoldier(rc); break; 
                     case MOPPER: runMopper(rc); break;
-                    case SPLASHER: break; // Consider upgrading examplefuncsplayer to use splashers!
+                    case SPLASHER: runSplasher(rc); break; // Consider upgrading examplefuncsplayer to use splashers!
                     default: runTower(rc); break;
                     }
                 }
@@ -107,33 +107,45 @@ public class RobotPlayer {
      * Run a single turn for towers.
      * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
      */
-    public static void runTower(RobotController rc) throws GameActionException{
-        // Pick a direction to build in.
-        Direction dir = directions[rng.nextInt(directions.length)];
-        MapLocation nextLoc = rc.getLocation().add(dir);
-        // Pick a random robot type to build.
-        int robotType = rng.nextInt(3);
-        if (robotType == 0 && rc.canBuildRobot(UnitType.SOLDIER, nextLoc)){
-            rc.buildRobot(UnitType.SOLDIER, nextLoc);
-            System.out.println("BUILT A SOLDIER");
-        }
-        else if (robotType == 1 && rc.canBuildRobot(UnitType.MOPPER, nextLoc)){
-            rc.buildRobot(UnitType.MOPPER, nextLoc);
-            System.out.println("BUILT A MOPPER");
-        }
-        else if (robotType == 2 && rc.canBuildRobot(UnitType.SPLASHER, nextLoc)){
-            // rc.buildRobot(UnitType.SPLASHER, nextLoc);
-            // System.out.println("BUILT A SPLASHER");
-            rc.setIndicatorString("SPLASHER NOT IMPLEMENTED YET");
-        }
+    
+    public static void runTower(RobotController rc) throws GameActionException {
+        int round = rc.getRoundNum();
 
-        // Read incoming messages
-        Message[] messages = rc.readMessages(-1);
-        for (Message m : messages) {
-            System.out.println("Tower received message: '#" + m.getSenderID() + " " + m.getBytes());
+        //ekonomi dibangun lewat Soldier
+        if (round < 80) {
+            if (tryBuildRobotAnywhere(rc, UnitType.SOLDIER)) {
+                rc.setIndicatorString("EARLY: built SOLDIER");
+            }
         }
+        //tambah support secukupnya
+        else if (round < 160) {
+            if (round % 3 == 0) {
+                if (tryBuildRobotAnywhere(rc, UnitType.MOPPER)) {
+                    rc.setIndicatorString("MID: built MOPPER");
+                }
+            } else {
+                if (tryBuildRobotAnywhere(rc, UnitType.SOLDIER)) {
+                    rc.setIndicatorString("MID: built SOLDIER");
+                }
+            }
+        }
+        //mulai pakai Splasher
+        else {
+            if (round % 2 == 0) {
+                if (tryBuildRobotAnywhere(rc, UnitType.SPLASHER)) {
+                    rc.setIndicatorString("LATE: built SPLASHER");
+                }
+            } else {
+                if (tryBuildRobotAnywhere(rc, UnitType.MOPPER)) {
+                    rc.setIndicatorString("LATE: built MOPPER");
+                }
+            }
+    }
 
-        // TODO: can we attack other bots?
+    Message[] messages = rc.readMessages(-1);
+    for (Message m : messages) {
+        System.out.println("Tower received message: '#" + m.getSenderID() + " " + m.getBytes());
+    }
     }
 
 
@@ -237,4 +249,87 @@ public class RobotPlayer {
             }
         }
     }
+
+    public static void randomMove(RobotController rc) throws GameActionException {
+    for (int i = 0; i < directions.length; i++) {
+        Direction dir = directions[rng.nextInt(directions.length)];
+        if (rc.canMove(dir)) {
+            rc.move(dir);
+            return;
+            }
+        }
+    }
+
+    public static void moveToward(RobotController rc, MapLocation target) throws GameActionException {
+        Direction dir = rc.getLocation().directionTo(target);
+        if (rc.canMove(dir)) {
+            rc.move(dir);
+            return;
+        }
+
+        Direction left = dir.rotateLeft();
+        Direction right = dir.rotateRight();
+
+        if (rc.canMove(left)) {
+            rc.move(left);
+            return;
+        }
+
+        if (rc.canMove(right)) {
+            rc.move(right);
+            return;
+        }
+
+        randomMove(rc);
+    }
+
+    public static MapLocation findNearestRuin(RobotController rc) throws GameActionException {
+    MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
+    MapLocation myLoc = rc.getLocation();
+
+    MapLocation bestRuin = null;
+    int bestDist = Integer.MAX_VALUE;
+
+        for (MapInfo tile : nearbyTiles) {
+            if (tile.hasRuin()) {
+                int dist = myLoc.distanceSquaredTo(tile.getMapLocation());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestRuin = tile.getMapLocation();
+                }
+            }
+        }
+    return bestRuin;
+    }
+
+    public static MapLocation findNearestNonAllyTile(RobotController rc) throws GameActionException {
+    MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
+    MapLocation myLoc = rc.getLocation();
+
+    MapLocation bestTile = null;
+    int bestDist = Integer.MAX_VALUE;
+
+        for (MapInfo tile : nearbyTiles) {
+            if (!tile.getPaint().isAlly()) {
+                int dist = myLoc.distanceSquaredTo(tile.getMapLocation());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestTile = tile.getMapLocation();
+                }
+            }
+        }
+    return bestTile;
+    }
+    public static boolean tryBuildRobotAnywhere(RobotController rc, UnitType type) throws GameActionException {
+        for (Direction dir : directions) {
+            MapLocation nextLoc = rc.getLocation().add(dir);
+            if (rc.canBuildRobot(type, nextLoc)) {
+                rc.buildRobot(type, nextLoc);
+                return true;
+            }
+        }
+    return false;
+    }
+
+
 }
