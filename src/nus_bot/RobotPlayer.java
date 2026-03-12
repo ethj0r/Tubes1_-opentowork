@@ -13,27 +13,42 @@ public class RobotPlayer {
         Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
         Direction.SOUTH, Direction.SOUTHWEST, Direction.WEST, Direction.NORTHWEST,
     };
+    static final Direction[] cardinals = {
+        Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST,
+    };
+
+    // ==================== MESSAGE PROTOCOL ====================
+    // Format: (msgType << 12) | (x << 6) | y
+    static final int MSG_ENEMY_RUIN = 1;
 
     // ==================== TOWER STATE ====================
     static int botSpawnedCount = 0;
+    static boolean mopperRequested = false;
+    static MapLocation requestedMopLoc = null;
 
     // ==================== SOLDIER MOVEMENT STATE ====================
-    static Direction currentDir = null;       // current heading
-    static int stepsInCurrentDir = 0;         // steps taken in current heading
-    static boolean wallFollowing = false;      // currently hugging a wall?
-    static Direction wallOrigDir = null;       // heading before we hit the wall
-    static int wallFollowSteps = 0;           // steps spent hugging
-    static Direction prevForcedDir = null;     // last direction forced by anti-loop
+    static Direction currentDir = null;
+    static int stepsInCurrentDir = 0;
+    static boolean wallFollowing = false;
+    static Direction wallOrigDir = null;
+    static int wallFollowSteps = 0;
+    static Direction prevForcedDir = null;
 
     // ==================== SOLDIER RUIN STATE ====================
     static MapLocation targetRuin = null;
+    static MapLocation knownPaintTower = null;
+    static boolean goingToRefuel = false;
+    static MapLocation enemyRuinToReport = null; // ruin with enemy paint, report when near tower
+
+    // ==================== MOPPER STATE ====================
+    static MapLocation mopTarget = null;
 
     // ==================== CONSTANTS ====================
-    static final int MAX_STRAIGHT_STEPS = 15;  // force direction change after this
-    static final int MAX_WALL_STEPS = 12;      // give up wall-following after this
-    static final int EDGE_MARGIN = 3;          // steer away from edges within this
-    static final int UPGRADE_L2_ROUND = 500;   // start upgrading to L2 after this round
-    static final int UPGRADE_L3_ROUND = 1000;  // start upgrading to L3 after this round
+    static final int MAX_STRAIGHT_STEPS = 15;
+    static final int MAX_WALL_STEPS = 12;
+    static final int EDGE_MARGIN = 3;
+    static final int UPGRADE_L2_ROUND = 500;
+    static final int UPGRADE_L3_ROUND = 1000;
 
     // ================================================================
     //                          MAIN LOOP
@@ -64,11 +79,88 @@ public class RobotPlayer {
     //                            TOWER
     // ================================================================
     public static void runTower(RobotController rc) throws GameActionException {
+        towerAttack(rc);
+        towerReadMessages(rc);
+        towerSpawn(rc);
+        towerForwardMessages(rc);
+    }
+
+    static void towerAttack(RobotController rc) throws GameActionException {
+        RobotInfo[] enemies = rc.senseNearbyRobots(-1, rc.getTeam().opponent());
+        if (enemies.length == 0 || !rc.isActionReady()) return;
+        RobotInfo target = enemies[0];
+        int minDist = rc.getLocation().distanceSquaredTo(target.location);
+        for (int i = 1; i < enemies.length; i++) {
+            int dist = rc.getLocation().distanceSquaredTo(enemies[i].location);
+            if (dist < minDist) {
+                minDist = dist;
+                target = enemies[i];
+            }
+        }
+        if (rc.canAttack(target.location)) {
+            rc.attack(target.location);
+        }
+    }
+
+    static void towerReadMessages(RobotController rc) throws GameActionException {
+        for (int r = rc.getRoundNum() - 1; r <= rc.getRoundNum(); r++) {
+            if (r < 0) continue;
+            Message[] msgs = rc.readMessages(r);
+            for (Message msg : msgs) {
+                int data = msg.getBytes();
+                int type = (data >> 12) & 0xF;
+                if (type == MSG_ENEMY_RUIN) {
+                    int x = (data >> 6) & 0x3F;
+                    int y = data & 0x3F;
+                    requestedMopLoc = new MapLocation(x, y);
+                    mopperRequested = true;
+                }
+            }
+        }
+    }
+
+    /**
+     * Spawn logic:
+     *   - If a soldier requested a mopper, spawn mopper next
+     *   - Otherwise: cycle [soldier, soldier, soldier, mopper] (75/25)
+     */
+    static void towerSpawn(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return;
+
+        UnitType toBuild;
+        if (mopperRequested) {
+            toBuild = UnitType.MOPPER;
+        } else {
+            int idx = botSpawnedCount % 4;
+            if (idx == 3) toBuild = UnitType.MOPPER;
+            else toBuild = UnitType.SOLDIER;
+        }
+
         for (Direction dir : directions) {
             MapLocation spawnLoc = rc.getLocation().add(dir);
-            if (rc.canBuildRobot(UnitType.SOLDIER, spawnLoc)) {
-                rc.buildRobot(UnitType.SOLDIER, spawnLoc);
+            if (rc.canBuildRobot(toBuild, spawnLoc)) {
+                rc.buildRobot(toBuild, spawnLoc);
                 botSpawnedCount++;
+                if (mopperRequested && toBuild == UnitType.MOPPER) {
+                    mopperRequested = false;
+                }
+                return;
+            }
+        }
+    }
+
+    /**
+     * Forward mop target location to nearby moppers so they know where to go.
+     */
+    static void towerForwardMessages(RobotController rc) throws GameActionException {
+        if (requestedMopLoc == null) return;
+        RobotInfo[] nearby = rc.senseNearbyRobots(-1, rc.getTeam());
+        for (RobotInfo ally : nearby) {
+            if (ally.type == UnitType.MOPPER) {
+                int msg = encodeLocation(MSG_ENEMY_RUIN, requestedMopLoc);
+                if (rc.canSendMessage(ally.location, msg)) {
+                    rc.sendMessage(ally.location, msg);
+                }
             }
         }
     }
@@ -77,21 +169,188 @@ public class RobotPlayer {
     //                           SOLDIER
     // ================================================================
     public static void runSoldier(RobotController rc) throws GameActionException {
-        // Priority 1: If we see an unbuilt ruin, try to build a tower on it
+        rememberNearestPaintTower(rc);
+
+        // Refuel loop: go to paint tower, withdraw, then return to ruin
+        if (goingToRefuel) {
+            // When near a tower, report enemy ruin if we have one
+            if (enemyRuinToReport != null) {
+                if (sendEnemyRuinMessage(rc, enemyRuinToReport)) {
+                    enemyRuinToReport = null; // sent successfully
+                }
+            }
+            if (tryWithdrawPaint(rc)) {
+                goingToRefuel = false;
+                return; // refueled, next turn go back to ruin
+            }
+            seekPaintTower(rc);
+            return;
+        }
+
+        // Low paint (25%) — fallback to refuel
+        if (rc.getPaint() < rc.getType().paintCapacity / 4) {
+            if (!tryWithdrawPaint(rc)) {
+                goingToRefuel = true;
+                seekPaintTower(rc);
+                return;
+            }
+        }
+
+        // Priority 1: Build towers at ruins
         if (tryBuildTower(rc)) return;
 
-        // Priority 2: Upgrade nearby ally towers if enough rounds have passed
+        // Priority 2: Upgrade nearby towers
         tryUpgradeTower(rc);
 
-        // Priority 3: Explore the map
+        // Priority 3: Explore
         soldierExplore(rc);
     }
 
     // ================================================================
     //                           MOPPER
     // ================================================================
+    /**
+     * Mopper behavior:
+     *   1. Read messages from towers — get assigned mop target
+     *   2. Mop swing at nearby enemy robots
+     *   3. Mop nearest enemy-painted tile
+     *   4. Move toward mop target OR toward nearest enemy paint OR explore
+     */
     public static void runMopper(RobotController rc) throws GameActionException {
-        // TODO
+        rememberNearestPaintTower(rc);
+        readMopperMessages(rc);
+
+        // Low paint (25%) — fallback to refuel at any tower
+        if (goingToRefuel) {
+            if (tryWithdrawPaintAny(rc)) {
+                goingToRefuel = false;
+                return;
+            }
+            seekAnyTower(rc);
+            return;
+        }
+        if (rc.getPaint() < rc.getType().paintCapacity / 4) {
+            if (!tryWithdrawPaintAny(rc)) {
+                goingToRefuel = true;
+                seekAnyTower(rc);
+                return;
+            }
+        }
+
+        tryMopSwing(rc);
+        tryMopSingle(rc);
+
+        // Movement
+        if (mopTarget != null) {
+            // Check if target area is clean
+            if (rc.canSenseLocation(mopTarget)) {
+                boolean stillDirty = false;
+                MapInfo[] area = rc.senseNearbyMapInfos(mopTarget, 8);
+                for (MapInfo tile : area) {
+                    if (tile.getPaint().isEnemy()) {
+                        stillDirty = true;
+                        break;
+                    }
+                }
+                if (!stillDirty) mopTarget = null;
+            }
+            if (mopTarget != null) {
+                moveToward(rc, mopTarget);
+            }
+        }
+
+        if (mopTarget == null) {
+            Direction bestDir = greedyMopperDirection(rc);
+            if (bestDir != null && rc.canMove(bestDir)) {
+                rc.move(bestDir);
+            }
+        }
+
+        // After moving, mop again
+        tryMopSingle(rc);
+    }
+
+    static void readMopperMessages(RobotController rc) throws GameActionException {
+        Message[] msgs = rc.readMessages(rc.getRoundNum() - 1);
+        for (Message msg : msgs) {
+            int data = msg.getBytes();
+            int type = (data >> 12) & 0xF;
+            if (type == MSG_ENEMY_RUIN) {
+                int x = (data >> 6) & 0x3F;
+                int y = data & 0x3F;
+                mopTarget = new MapLocation(x, y);
+            }
+        }
+    }
+
+    static Direction greedyMopperDirection(RobotController rc) throws GameActionException {
+        Direction bestDir = null;
+        int bestScore = 0;
+
+        for (Direction dir : directions) {
+            if (!rc.canMove(dir)) continue;
+            MapLocation dest = rc.getLocation().add(dir);
+            int score = 0;
+            MapInfo[] tiles = rc.senseNearbyMapInfos(dest, 8);
+            for (MapInfo tile : tiles) {
+                if (tile.getPaint().isEnemy()) score++;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestDir = dir;
+            }
+        }
+
+        if (bestDir == null) {
+            return getExploreDirection(rc);
+        }
+        return bestDir;
+    }
+
+    static boolean tryMopSwing(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return false;
+        Direction bestSwing = null;
+        int bestHits = 0;
+        for (Direction dir : cardinals) {
+            if (!rc.canMopSwing(dir)) continue;
+            int hits = countEnemiesInSwingDir(rc, dir);
+            if (hits > bestHits) {
+                bestHits = hits;
+                bestSwing = dir;
+            }
+        }
+        if (bestSwing != null && bestHits > 0) {
+            rc.mopSwing(bestSwing);
+            return true;
+        }
+        return false;
+    }
+
+    static int countEnemiesInSwingDir(RobotController rc, Direction dir) throws GameActionException {
+        RobotInfo[] enemies = rc.senseNearbyRobots(-1, rc.getTeam().opponent());
+        MapLocation myLoc = rc.getLocation();
+        MapLocation step1 = myLoc.add(dir);
+        MapLocation step2 = step1.add(dir);
+        int count = 0;
+        for (RobotInfo enemy : enemies) {
+            MapLocation eLoc = enemy.location;
+            if (eLoc.distanceSquaredTo(step1) <= 2 || eLoc.distanceSquaredTo(step2) <= 2) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    static boolean tryMopSingle(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return false;
+        MapInfo[] nearby = rc.senseNearbyMapInfos(rc.getLocation(), 2);
+        for (MapInfo tile : nearby) {
+            if (tile.getPaint().isEnemy() && rc.canAttack(tile.getMapLocation())) {
+                rc.attack(tile.getMapLocation());
+                return true;
+            }
+        }
+        return false;
     }
 
     // ================================================================
@@ -104,24 +363,12 @@ public class RobotPlayer {
     // ================================================================
     //                    SOLDIER: TOWER BUILDING
     // ================================================================
-    /**
-     * Greedy tower building:
-     *   1. Find nearest unbuilt ruin
-     *   2. Move toward it
-     *   3. Mark the pattern (places marks showing what color each tile needs)
-     *   4. Paint tiles to match marks
-     *   5. Complete the tower when all tiles are correct
-     *
-     * Returns true if the soldier is busy building (so it shouldn't explore).
-     */
     static boolean tryBuildTower(RobotController rc) throws GameActionException {
-        // --- Find a ruin to work on ---
         if (targetRuin == null) {
             targetRuin = findNearestUnbuiltRuin(rc);
         }
         if (targetRuin == null) return false;
 
-        // Validate: if someone else already built a tower there, clear target
         if (rc.canSenseLocation(targetRuin)) {
             RobotInfo occupant = rc.senseRobotAtLocation(targetRuin);
             if (occupant != null && occupant.getType().isTowerType()) {
@@ -132,44 +379,37 @@ public class RobotPlayer {
 
         int distToRuin = rc.getLocation().distanceSquaredTo(targetRuin);
 
-        // Too far — walk toward the ruin
         if (distToRuin > 8) {
-            Direction dir = rc.getLocation().directionTo(targetRuin);
-            if (rc.canMove(dir)) {
-                rc.move(dir);
-            } else if (rc.canMove(dir.rotateRight())) {
-                rc.move(dir.rotateRight());
-            } else if (rc.canMove(dir.rotateLeft())) {
-                rc.move(dir.rotateLeft());
-            }
-            return true; // busy walking to ruin
+            moveToward(rc, targetRuin);
+            return true;
         }
 
-        // --- Close enough: pick tower type ---
-        // Simple ratio: (x+y) % 3 == 0 → money tower, else paint tower
+        // Tower type: 1:2 money:paint
         UnitType towerType;
-        if ((targetRuin.x + targetRuin.y) % 2 == 0) {
+        if ((targetRuin.x + targetRuin.y) % 3 == 0) {
             towerType = UnitType.LEVEL_ONE_MONEY_TOWER;
         } else {
             towerType = UnitType.LEVEL_ONE_PAINT_TOWER;
         }
 
-        // --- Step 1: Mark the pattern ---
         if (rc.canMarkTowerPattern(towerType, targetRuin)) {
             rc.markTowerPattern(towerType, targetRuin);
         }
 
-        // --- Step 2: Find a tile that needs painting ---
+        // Find tile that needs painting — skip enemy paint
         MapLocation tileToPaint = null;
         int nearestDist = Integer.MAX_VALUE;
         boolean useSecondary = false;
+        boolean hasEnemyPaint = false;
 
         for (MapInfo tile : rc.senseNearbyMapInfos(targetRuin, 8)) {
             PaintType mark = tile.getMark();
-            if (mark == PaintType.EMPTY) continue;             // not part of pattern
-            if (tile.getPaint().isEnemy()) continue;            // soldier can't overwrite enemy paint
-            if (mark == tile.getPaint()) continue;              // already correct color
-
+            if (mark == PaintType.EMPTY) continue;
+            if (tile.getPaint().isEnemy()) {
+                hasEnemyPaint = true;
+                continue;
+            }
+            if (mark == tile.getPaint()) continue;
             MapLocation loc = tile.getMapLocation();
             int dist = rc.getLocation().distanceSquaredTo(loc);
             if (dist < nearestDist) {
@@ -179,50 +419,45 @@ public class RobotPlayer {
             }
         }
 
-        // --- Step 3: Paint the tile ---
-        if (tileToPaint != null) {
-            // Move closer if out of attack range
-            if (!rc.canAttack(tileToPaint)) {
-                Direction dir = rc.getLocation().directionTo(tileToPaint);
-                if (rc.canMove(dir)) rc.move(dir);
-                else if (rc.canMove(dir.rotateRight())) rc.move(dir.rotateRight());
-                else if (rc.canMove(dir.rotateLeft())) rc.move(dir.rotateLeft());
-            }
-            // Paint it
-            if (rc.canAttack(tileToPaint)) {
-                rc.attack(tileToPaint, useSecondary);
-            }
-            return true; // busy painting
-        }
-
-        // --- Step 4: All tiles done? Complete the tower! ---
-        if (rc.canCompleteTowerPattern(towerType, targetRuin)) {
-            rc.completeTowerPattern(towerType, targetRuin);
-            targetRuin = null; // done, look for next ruin
+        // Enemy paint blocks us and nothing else to paint:
+        //   1. Save ruin location to report when we reach the tower
+        //   2. Go refuel at paint tower, then come back
+        if (hasEnemyPaint && tileToPaint == null) {
+            enemyRuinToReport = targetRuin;
+            goingToRefuel = true;
+            seekPaintTower(rc);
             return true;
         }
 
-        // Still close but can't complete yet — move closer to ruin center
-        if (distToRuin > 2) {
-            Direction dir = rc.getLocation().directionTo(targetRuin);
-            if (rc.canMove(dir)) rc.move(dir);
+        if (tileToPaint != null) {
+            if (!rc.canAttack(tileToPaint)) {
+                moveToward(rc, tileToPaint);
+            }
+            if (rc.canAttack(tileToPaint)) {
+                rc.attack(tileToPaint, useSecondary);
+            }
+            return true;
         }
 
-        return true; // busy working on this ruin
+        if (rc.canCompleteTowerPattern(towerType, targetRuin)) {
+            rc.completeTowerPattern(towerType, targetRuin);
+            targetRuin = null;
+            return true;
+        }
+
+        if (distToRuin > 2) {
+            moveToward(rc, targetRuin);
+        }
+        return true;
     }
 
-    /**
-     * Scan all visible ruins and return the nearest one that has no tower on it.
-     */
     static MapLocation findNearestUnbuiltRuin(RobotController rc) throws GameActionException {
         MapLocation[] ruins = rc.senseNearbyRuins(-1);
         MapLocation closest = null;
         int closestDist = Integer.MAX_VALUE;
-
         for (MapLocation ruin : ruins) {
             RobotInfo occupant = rc.senseRobotAtLocation(ruin);
             if (occupant != null && occupant.getType().isTowerType()) continue;
-
             int dist = rc.getLocation().distanceSquaredTo(ruin);
             if (dist < closestDist) {
                 closestDist = dist;
@@ -235,108 +470,230 @@ public class RobotPlayer {
     // ================================================================
     //                   SOLDIER: TOWER UPGRADING
     // ================================================================
-    /**
-     * Scan nearby ally towers and upgrade them if possible.
-     *   - After round 500: upgrade L1 towers to L2
-     *   - After round 1000: upgrade L2 towers to L3
-     */
     static void tryUpgradeTower(RobotController rc) throws GameActionException {
         int round = rc.getRoundNum();
-        if (round < UPGRADE_L2_ROUND) return; // too early
+        if (round < UPGRADE_L2_ROUND) return;
 
         RobotInfo[] nearbyRobots = rc.senseNearbyRobots(-1, rc.getTeam());
         for (RobotInfo robot : nearbyRobots) {
             if (!robot.getType().isTowerType()) continue;
-            if (!robot.getType().canUpgradeType()) continue; // already max level
+            if (!robot.getType().canUpgradeType()) continue;
 
             int level = robot.getType().level;
-            // Only upgrade L1→L2 if round >= 500, L2→L3 if round >= 1000
             if (level == 1 && round >= UPGRADE_L2_ROUND) {
-                // ok to upgrade
+                // ok
             } else if (level == 2 && round >= UPGRADE_L3_ROUND) {
-                // ok to upgrade
+                // ok
             } else {
                 continue;
             }
 
             MapLocation towerLoc = robot.getLocation();
-
-            // Must be adjacent (within √2) to upgrade
             if (rc.getLocation().distanceSquaredTo(towerLoc) <= 2) {
                 if (rc.canUpgradeTower(towerLoc)) {
                     rc.upgradeTower(towerLoc);
-                    return; // one upgrade per turn
+                    return;
                 }
             }
         }
     }
 
     // ================================================================
+    //                    COMMUNICATION HELPERS
+    // ================================================================
+    static int encodeLocation(int msgType, MapLocation loc) {
+        return (msgType << 12) | (loc.x << 6) | loc.y;
+    }
+
+    static boolean sendEnemyRuinMessage(RobotController rc, MapLocation ruinLoc) throws GameActionException {
+        RobotInfo[] allies = rc.senseNearbyRobots(-1, rc.getTeam());
+        for (RobotInfo ally : allies) {
+            if (ally.type.isTowerType()) {
+                int msg = encodeLocation(MSG_ENEMY_RUIN, ruinLoc);
+                if (rc.canSendMessage(ally.location, msg)) {
+                    rc.sendMessage(ally.location, msg);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // ================================================================
+    //                    PAINT TOWER / REFUEL
+    // ================================================================
+    static boolean isPaintTower(UnitType type) {
+        return type == UnitType.LEVEL_ONE_PAINT_TOWER
+            || type == UnitType.LEVEL_TWO_PAINT_TOWER
+            || type == UnitType.LEVEL_THREE_PAINT_TOWER;
+    }
+
+    static void rememberNearestPaintTower(RobotController rc) throws GameActionException {
+        RobotInfo[] allies = rc.senseNearbyRobots(-1, rc.getTeam());
+        for (RobotInfo ally : allies) {
+            if (isPaintTower(ally.type)) {
+                if (knownPaintTower == null ||
+                    rc.getLocation().distanceSquaredTo(ally.location) <
+                    rc.getLocation().distanceSquaredTo(knownPaintTower)) {
+                    knownPaintTower = ally.location;
+                }
+            }
+        }
+    }
+
+    static boolean tryWithdrawPaint(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return false;
+        RobotInfo[] nearby = rc.senseNearbyRobots(2, rc.getTeam());
+        for (RobotInfo ally : nearby) {
+            if (!isPaintTower(ally.type)) continue;
+            if (ally.paintAmount > 0) {
+                int needed = rc.getType().paintCapacity - rc.getPaint();
+                int canTake = Math.min(needed, ally.paintAmount);
+                if (canTake > 0 && rc.canTransferPaint(ally.location, -canTake)) {
+                    rc.transferPaint(ally.location, -canTake);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static void seekPaintTower(RobotController rc) throws GameActionException {
+        RobotInfo[] allies = rc.senseNearbyRobots(-1, rc.getTeam());
+        MapLocation nearest = null;
+        int nearestDist = Integer.MAX_VALUE;
+        for (RobotInfo ally : allies) {
+            if (!isPaintTower(ally.type)) continue;
+            int dist = rc.getLocation().distanceSquaredTo(ally.location);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearest = ally.location;
+            }
+        }
+        if (nearest != null) {
+            knownPaintTower = nearest;
+            moveToward(rc, nearest);
+        } else if (knownPaintTower != null) {
+            moveToward(rc, knownPaintTower);
+        }
+    }
+
+    /**
+     * Withdraw paint from any nearby ally tower (for mopper).
+     */
+    static boolean tryWithdrawPaintAny(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return false;
+        RobotInfo[] nearby = rc.senseNearbyRobots(2, rc.getTeam());
+        for (RobotInfo ally : nearby) {
+            if (!ally.type.isTowerType()) continue;
+            if (ally.paintAmount > 0) {
+                int needed = rc.getType().paintCapacity - rc.getPaint();
+                int canTake = Math.min(needed, ally.paintAmount);
+                if (canTake > 0 && rc.canTransferPaint(ally.location, -canTake)) {
+                    rc.transferPaint(ally.location, -canTake);
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Move toward nearest ally tower (any type, for mopper refuel).
+     */
+    static void seekAnyTower(RobotController rc) throws GameActionException {
+        RobotInfo[] allies = rc.senseNearbyRobots(-1, rc.getTeam());
+        MapLocation nearest = null;
+        int nearestDist = Integer.MAX_VALUE;
+        for (RobotInfo ally : allies) {
+            if (!ally.type.isTowerType()) continue;
+            int dist = rc.getLocation().distanceSquaredTo(ally.location);
+            if (dist < nearestDist) {
+                nearestDist = dist;
+                nearest = ally.location;
+            }
+        }
+        if (nearest != null) {
+            moveToward(rc, nearest);
+        } else if (knownPaintTower != null) {
+            moveToward(rc, knownPaintTower);
+        }
+    }
+
+    // ================================================================
+    //                    MOVEMENT: moveToward
+    // ================================================================
+    static void moveToward(RobotController rc, MapLocation target) throws GameActionException {
+        if (!rc.isMovementReady()) return;
+        if (rc.getLocation().equals(target)) return;
+        Direction dir = rc.getLocation().directionTo(target);
+        if (rc.canMove(dir)) {
+            rc.move(dir);
+        } else if (rc.canMove(dir.rotateLeft())) {
+            rc.move(dir.rotateLeft());
+        } else if (rc.canMove(dir.rotateRight())) {
+            rc.move(dir.rotateRight());
+        } else if (rc.canMove(dir.rotateLeft().rotateLeft())) {
+            rc.move(dir.rotateLeft().rotateLeft());
+        } else if (rc.canMove(dir.rotateRight().rotateRight())) {
+            rc.move(dir.rotateRight().rotateRight());
+        }
+    }
+
+    // ================================================================
+    //                    EXPLORE DIRECTION (mopper)
+    // ================================================================
+    static Direction getExploreDirection(RobotController rc) throws GameActionException {
+        if (currentDir == null || !rc.canMove(currentDir)) {
+            currentDir = directions[rng.nextInt(directions.length)];
+        }
+        for (int i = 0; i < 8; i++) {
+            if (rc.canMove(currentDir)) return currentDir;
+            currentDir = currentDir.rotateRight();
+        }
+        return null;
+    }
+
+    // ================================================================
     //                    SOLDIER GREEDY EXPLORE
     // ================================================================
-    /**
-     * Greedy exploration with 3 layers:
-     *   1. Edge avoidance  — steer toward center near map borders
-     *   2. Anti-loop        — force new heading after too many straight steps
-     *   3. Wall-following   — hug wall to find gaps, give up after a limit
-     *   4. Normal movement  — go straight, prefer unpainted tiles
-     */
     static void soldierExplore(RobotController rc) throws GameActionException {
-        // Initialize direction on first turn
         if (currentDir == null) {
             currentDir = directions[rng.nextInt(directions.length)];
             stepsInCurrentDir = 0;
         }
 
-        // --- Layer 1: Edge avoidance ---
         if (!wallFollowing && tryEdgeAvoidance(rc)) return;
 
-        // --- Layer 2: Anti-loop ---
         if (stepsInCurrentDir >= MAX_STRAIGHT_STEPS) {
             if (tryForceNewDirection(rc)) return;
-            stepsInCurrentDir = 0; // reset even if we couldn't move
+            stepsInCurrentDir = 0;
         }
 
-        // --- Layer 3: Wall-following ---
         if (wallFollowing) {
             wallFollowSteps++;
-
-            // 3a: Gave up — too many steps, pick a new direction away
             if (wallFollowSteps >= MAX_WALL_STEPS) {
                 exitWallFollow(rc);
                 return;
             }
-
-            // 3b: Check for gap (original dir ± 45°)
             if (tryGap(rc)) return;
-
-            // 3c: Keep hugging wall (right-hand rule)
             if (tryHugWall(rc, wallOrigDir)) return;
-
-            return; // completely stuck, wait
+            return;
         }
 
-        // --- Layer 4: Normal straight movement ---
         if (rc.canMove(currentDir)) {
             rc.move(currentDir);
             stepsInCurrentDir++;
             return;
         }
 
-        // Blocked — enter wall-following
         wallFollowing = true;
         wallOrigDir = currentDir;
         wallFollowSteps = 0;
         if (tryHugWall(rc, currentDir)) return;
-        // Can't even start hugging, just wait
     }
 
-    // ======================== HELPERS ========================
-
-    /**
-     * If near a map edge, steer toward center.
-     * Returns true if a move was made.
-     */
+    // ======================== EXPLORE HELPERS ========================
     static boolean tryEdgeAvoidance(RobotController rc) throws GameActionException {
         int x = rc.getLocation().x;
         int y = rc.getLocation().y;
@@ -345,7 +702,7 @@ public class RobotPlayer {
 
         if (x >= EDGE_MARGIN && x < w - EDGE_MARGIN &&
             y >= EDGE_MARGIN && y < h - EDGE_MARGIN) {
-            return false; // not near edge
+            return false;
         }
 
         Direction toCenter = rc.getLocation().directionTo(new MapLocation(w / 2, h / 2));
@@ -354,27 +711,20 @@ public class RobotPlayer {
         }, true);
     }
 
-    /**
-     * Force a new direction to break loops.
-     * Detects corridor oscillation: if we'd just reverse the last forced direction,
-     * try perpendicular directions first or enter wall-following.
-     */
     static boolean tryForceNewDirection(RobotController rc) throws GameActionException {
         boolean oscillating = (prevForcedDir != null && currentDir.equals(prevForcedDir.opposite()));
 
         Direction[] choices;
         if (oscillating) {
-            // We're bouncing back and forth — try perpendicular escape first
             choices = new Direction[]{
-                currentDir.rotateRight().rotateRight(),                  // 90° right
-                currentDir.rotateLeft().rotateLeft(),                    // 90° left
-                currentDir.rotateRight(),                                // 45° right
-                currentDir.rotateLeft(),                                 // 45° left
-                currentDir.rotateRight().rotateRight().rotateRight(),     // 135° right
-                currentDir.rotateLeft().rotateLeft().rotateLeft(),        // 135° left
+                currentDir.rotateRight().rotateRight(),
+                currentDir.rotateLeft().rotateLeft(),
+                currentDir.rotateRight(),
+                currentDir.rotateLeft(),
+                currentDir.rotateRight().rotateRight().rotateRight(),
+                currentDir.rotateLeft().rotateLeft().rotateLeft(),
             };
         } else {
-            // Normal anti-loop: prefer opposite
             choices = new Direction[]{
                 currentDir.opposite(),
                 currentDir.opposite().rotateRight(),
@@ -386,11 +736,10 @@ public class RobotPlayer {
 
         boolean moved = tryMoveInOrder(rc, choices, true);
         if (moved) {
-            prevForcedDir = currentDir;  // record what we forced
+            prevForcedDir = currentDir;
         } else if (oscillating) {
-            // Can't escape perpendicular either — enter wall-following sideways
             wallFollowing = true;
-            wallOrigDir = currentDir.rotateRight().rotateRight(); // aim perpendicular
+            wallOrigDir = currentDir.rotateRight().rotateRight();
             wallFollowSteps = 0;
             prevForcedDir = null;
             return tryHugWall(rc, wallOrigDir);
@@ -398,10 +747,6 @@ public class RobotPlayer {
         return moved;
     }
 
-    /**
-     * Check if a gap exists in roughly the original direction.
-     * Returns true if we moved through a gap.
-     */
     static boolean tryGap(RobotController rc) throws GameActionException {
         Direction[] gapDirs = {
             wallOrigDir,
@@ -410,7 +755,6 @@ public class RobotPlayer {
         };
         for (Direction dir : gapDirs) {
             if (rc.canMove(dir)) {
-                // Verify the gap leads somewhere open (not just a 1-tile pocket)
                 MapLocation beyond = rc.getLocation().add(dir).add(wallOrigDir);
                 boolean gapIsReal = true;
                 if (rc.onTheMap(beyond) && rc.canSenseLocation(beyond)) {
@@ -429,32 +773,26 @@ public class RobotPlayer {
         return false;
     }
 
-    /**
-     * Hug the wall using right-hand rule relative to `blockedDir`.
-     * Returns true if a move was made.
-     */
     static boolean tryHugWall(RobotController rc, Direction blockedDir) throws GameActionException {
         Direction[] hugOrder = {
-            blockedDir.rotateRight().rotateRight(),                       // 90° right
-            blockedDir.rotateRight(),                                     // 45° right
-            blockedDir.rotateRight().rotateRight().rotateRight(),          // 135° right
-            blockedDir.rotateLeft().rotateLeft(),                          // 90° left
-            blockedDir.rotateLeft(),                                       // 45° left
-            blockedDir.rotateLeft().rotateLeft().rotateLeft(),             // 135° left
-            blockedDir.opposite(),                                         // 180°
+            blockedDir.rotateRight().rotateRight(),
+            blockedDir.rotateRight(),
+            blockedDir.rotateRight().rotateRight().rotateRight(),
+            blockedDir.rotateLeft().rotateLeft(),
+            blockedDir.rotateLeft(),
+            blockedDir.rotateLeft().rotateLeft().rotateLeft(),
+            blockedDir.opposite(),
         };
         for (Direction dir : hugOrder) {
             if (rc.canMove(dir)) {
                 rc.move(dir);
+                wallOrigDir = dir.opposite();
                 return true;
             }
         }
         return false;
     }
 
-    /**
-     * Exit wall-following: pick a direction away from the original wall heading.
-     */
     static void exitWallFollow(RobotController rc) throws GameActionException {
         wallFollowing = false;
         boolean moved = tryMoveInOrder(rc, new Direction[]{
@@ -466,17 +804,11 @@ public class RobotPlayer {
         }, true);
 
         if (!moved) {
-            // Truly stuck, randomize
             currentDir = directions[rng.nextInt(directions.length)];
         }
         stepsInCurrentDir = 0;
     }
 
-    /**
-     * Try to move in the first valid direction from the list.
-     * If `updateDir` is true, also updates currentDir and resets step counter.
-     * Returns true if a move was made.
-     */
     static boolean tryMoveInOrder(RobotController rc, Direction[] dirs, boolean updateDir)
             throws GameActionException {
         for (Direction dir : dirs) {
