@@ -55,14 +55,13 @@ public class RobotPlayer {
     static MapLocation exploreTarget = null;
 
     // SRP resource pattern
-    static boolean[][] resourcePat = null;
     static MapLocation markedResource = null;
     static boolean[][] moneyTowerPat = null;
     static boolean[][] paintTowerPat = null;
 
     // constants
-    static final int UPGRADE_L2_ROUND = 500;
-    static final int UPGRADE_L3_ROUND = 1000;
+    static final int UPGRADE_L2_ROUND = 200;
+    static final int UPGRADE_L3_ROUND = 400;
 
     // ================================================================
     //                          MAIN LOOP
@@ -74,7 +73,6 @@ public class RobotPlayer {
 
         // init patterns once
         if (!rc.getType().isTowerType()) {
-            resourcePat = rc.getResourcePattern();
             moneyTowerPat = rc.getTowerPattern(UnitType.LEVEL_ONE_MONEY_TOWER);
             paintTowerPat = rc.getTowerPattern(UnitType.LEVEL_ONE_PAINT_TOWER);
         }
@@ -161,8 +159,10 @@ public class RobotPlayer {
         if (mopperRequested) {
             toBuild = UnitType.MOPPER;
         } else {
-            int idx = botSpawnedCount % 4;
-            if (idx == 3) toBuild = UnitType.MOPPER;
+            // cycle: sol, sol, splasher, sol, sol, mop (6-cycle)
+            int idx = botSpawnedCount % 6;
+            if (idx == 5) toBuild = UnitType.SPLASHER;
+            else if (idx == 2) toBuild = UnitType.MOPPER;
             else toBuild = UnitType.SOLDIER;
         }
 
@@ -186,8 +186,8 @@ public class RobotPlayer {
         for (RobotInfo ally : nearby) {
             if (ally.type.isTowerType()) continue;
 
-            if (ally.type == UnitType.SOLDIER) {
-                // soldiers get enemy tower locations
+            if (ally.type == UnitType.SOLDIER || ally.type == UnitType.SPLASHER) {
+                // soldiers and splashers get enemy tower locations
                 if (towerEnemyTowerLoc != null) {
                     int msg = encodeLocation(MSG_ENEMY_TOWER, towerEnemyTowerLoc);
                     if (rc.canSendMessage(ally.location, msg)) {
@@ -218,6 +218,14 @@ public class RobotPlayer {
         MapLocation myloc = rc.getLocation();
         int myPaint = rc.getPaint();
         int paintCap = rc.getType().paintCapacity;
+
+        // emergency: if on enemy paint and very low, flee to ally paint
+        if (myPaint <= paintCap / 8 && rc.isMovementReady()) {
+            MapInfo here = rc.senseMapInfo(myloc);
+            if (here.getPaint().isEnemy()) {
+                fleeToAllyPaint(rc);
+            }
+        }
 
         // update home tower (like RefuelManager.setHome)
         setHome(rc);
@@ -353,6 +361,14 @@ public class RobotPlayer {
         int paintCap = rc.getType().paintCapacity;
         MapInfo[] near = rc.senseNearbyMapInfos();
 
+        // emergency flee if on enemy paint and very low
+        if (myPaint <= paintCap / 8 && rc.isMovementReady()) {
+            MapInfo here = rc.senseMapInfo(rc.getLocation());
+            if (here.getPaint().isEnemy()) {
+                fleeToAllyPaint(rc);
+            }
+        }
+
         setHome(rc);
         readMopperMessages(rc);
         spotAndReportEnemies(rc);
@@ -463,6 +479,8 @@ public class RobotPlayer {
     // ================================================================
     public static void runSplasher(RobotController rc) throws GameActionException {
         setHome(rc);
+        spotAndReportEnemies(rc);
+        readAttackMessages(rc);
         int myPaint = rc.getPaint();
         int paintCap = rc.getType().paintCapacity;
 
@@ -472,53 +490,132 @@ public class RobotPlayer {
             reachedHome = false;
         }
 
+        // rally to attack enemy tower
+        if (attackTarget != null) {
+            MapLocation myloc = rc.getLocation();
+            if (myloc.distanceSquaredTo(attackTarget) > 100) {
+                attackTarget = null;
+            } else if (rc.canSenseLocation(attackTarget)) {
+                RobotInfo etower = rc.senseRobotAtLocation(attackTarget);
+                if (etower == null || etower.team == rc.getTeam()) {
+                    attackTarget = null;
+                } else {
+                    moveToward(rc, attackTarget);
+                    splasherDoAttack(rc);
+                    return;
+                }
+            } else {
+                moveToward(rc, attackTarget);
+                splasherDoAttack(rc);
+                return;
+            }
+        }
+
         if (shouldGoHome) {
             refuel(rc);
             return;
         }
 
-        // try splash enemy paint areas
-        if (rc.isActionReady()) {
-            MapLocation bestSplash = findBestSplash(rc);
-            if (bestSplash != null && rc.canAttack(bestSplash)) {
-                rc.attack(bestSplash);
+        // splasher micro: if enemies nearby, approach and splash them
+        if (shouldSplasherMicro(rc)) {
+            splasherMicro(rc);
+            splasherDoAttack(rc);
+            return;
+        }
+
+        // splash before moving (might be in range already)
+        splasherDoAttack(rc);
+
+        // if too many ally splashers very close, spread out
+        RobotInfo[] nearAllies = rc.senseNearbyRobots(8, rc.getTeam());
+        int nearbySplashers = 0;
+        for (RobotInfo a : nearAllies) {
+            if (a.type == UnitType.SPLASHER) nearbySplashers++;
+        }
+
+        // move toward enemy/empty paint, or explore
+        MapLocation enemyPaint = findNearestEnemyPaint(rc);
+        if (enemyPaint != null && nearbySplashers < 3) {
+            moveToward(rc, enemyPaint);
+        } else {
+            MapLocation emptyPaint = findNearestEmptyPaint(rc);
+            if (emptyPaint != null && nearbySplashers < 3) {
+                moveToward(rc, emptyPaint);
+            } else {
+                explore(rc);
             }
         }
 
-        // find enemy paint and move toward it
-        MapLocation enemyPaint = findNearestEnemyPaint(rc);
-        if (enemyPaint != null) {
-            moveToward(rc, enemyPaint);
-        } else {
-            explore(rc);
+        // splash after moving too
+        splasherDoAttack(rc);
+    }
+
+    // check if splasher should micro against enemies
+    static boolean shouldSplasherMicro(RobotController rc) throws GameActionException {
+        RobotInfo[] enemies = rc.senseNearbyRobots(20, rc.getTeam().opponent());
+        for (RobotInfo e : enemies) {
+            if (!e.type.isTowerType() && e.paintAmount > 0) return true;
+        }
+        return false;
+    }
+
+    // micro toward enemies to splash them
+    static void splasherMicro(RobotController rc) throws GameActionException {
+        RobotInfo[] enemies = rc.senseNearbyRobots(20, rc.getTeam().opponent());
+        if (enemies.length == 0) return;
+        // find nearest enemy with paint
+        RobotInfo target = null;
+        int bestDist = Integer.MAX_VALUE;
+        for (RobotInfo e : enemies) {
+            if (e.type.isTowerType()) continue;
+            int d = rc.getLocation().distanceSquaredTo(e.location);
+            if (d < bestDist) { bestDist = d; target = e; }
+        }
+        if (target != null) {
+            moveToward(rc, target.location);
         }
     }
 
-    // find tile to splash that has most enemy/empty tiles nearby
-    static MapLocation findBestSplash(RobotController rc) throws GameActionException {
-        MapInfo[] nearby = rc.senseNearbyMapInfos(rc.getLocation(), 4);
-        MapLocation best = null;
+    // evaluate each attackable tile's 3x3 splash area (like mopper_and_srp)
+    // enemy paint = +2, empty = +1, ally = 0
+    static void splasherDoAttack(RobotController rc) throws GameActionException {
+        if (!rc.isActionReady()) return;
+        if (rc.getPaint() < rc.getType().paintCapacity / 4) return;
+
+        MapLocation bestLoc = null;
         int bestScore = 0;
-        for (MapInfo tile : nearby) {
+
+        // check all attackable locations (within action radius)
+        MapInfo[] attackable = rc.senseNearbyMapInfos(rc.getType().actionRadiusSquared);
+        for (MapInfo tile : attackable) {
             MapLocation loc = tile.getMapLocation();
             if (!rc.canAttack(loc)) continue;
+            if (tile.isWall() || tile.hasRuin()) continue;
+
+            // score the 3x3 area around the target (splash zone)
             int score = 0;
-            for (Direction d : directions) {
-                MapLocation adj = loc.add(d);
-                if (rc.canSenseLocation(adj)) {
-                    PaintType p = rc.senseMapInfo(adj).getPaint();
-                    if (p.isEnemy()) score += 3;
-                    else if (p == PaintType.EMPTY) score += 1;
+            for (int dx = -1; dx <= 1; dx++) {
+                for (int dy = -1; dy <= 1; dy++) {
+                    MapLocation adj = new MapLocation(loc.x + dx, loc.y + dy);
+                    if (rc.canSenseLocation(adj)) {
+                        MapInfo mi = rc.senseMapInfo(adj);
+                        if (mi.isWall() || mi.hasRuin()) continue;
+                        PaintType p = mi.getPaint();
+                        if (p.isEnemy()) score += 2;
+                        else if (p == PaintType.EMPTY) score += 1;
+                        // ally paint = 0 (no benefit to paint over our own)
+                    }
                 }
             }
-            if (tile.getPaint().isEnemy()) score += 3;
-            else if (tile.getPaint() == PaintType.EMPTY) score += 1;
             if (score > bestScore) {
                 bestScore = score;
-                best = loc;
+                bestLoc = loc;
             }
         }
-        return (bestScore >= 3) ? best : null;
+
+        if (bestLoc != null && bestScore >= 2 && rc.canAttack(bestLoc)) {
+            rc.attack(bestLoc);
+        }
     }
 
     // ================================================================
@@ -644,13 +741,16 @@ public class RobotPlayer {
     }
 
     // ================================================================
-    //                    MOVEMENT: moveToward (greedy + bug)
+    //                    MOVEMENT: moveToward (greedy + Bug2)
     // ================================================================
     static boolean bugFollowing = false;
-    static Direction bugDir = null;
+    static Direction bugWallDir = null;
     static int bugStartDist = Integer.MAX_VALUE;
+    static int bugBestDist = Integer.MAX_VALUE;
     static int bugTurns = 0;
+    static boolean bugRotateRight = true;
     static MapLocation lastMoveTarget = null;
+    static MapLocation bugPrevLoc = null;
 
     static void moveToward(RobotController rc, MapLocation target) throws GameActionException {
         if (!rc.isMovementReady()) return;
@@ -664,17 +764,24 @@ public class RobotPlayer {
 
         int curDist = rc.getLocation().distanceSquaredTo(target);
 
-        // if bug following and we found a better spot than when we started, stop bug
+        // exit bug if closer than start
         if (bugFollowing && curDist < bugStartDist) {
             bugFollowing = false;
         }
-        // bug timeout
-        if (bugFollowing && bugTurns > 8) {
+        // timeout: switch direction and retry
+        if (bugFollowing && bugTurns > 20) {
             bugFollowing = false;
+            bugRotateRight = !bugRotateRight;
+        }
+        // no progress in 10 turns: flip rotation
+        if (bugFollowing && bugTurns > 10 && curDist >= bugBestDist) {
+            bugRotateRight = !bugRotateRight;
+            bugTurns = 0;
+            bugBestDist = curDist;
         }
 
         if (!bugFollowing) {
-            // greedy: pick best neighbor, with paint-awareness tiebreaking
+            // greedy: pick best neighbor with paint tiebreaking
             Direction bestDir = null;
             int bestDist = curDist;
             int bestPaintScore = Integer.MIN_VALUE;
@@ -682,13 +789,12 @@ public class RobotPlayer {
                 if (!rc.canMove(dir)) continue;
                 MapLocation next = rc.getLocation().add(dir);
                 int dist = next.distanceSquaredTo(target);
-                // paint scoring: ally paint=2, empty=1, enemy=-1
                 int paintScore = 0;
                 if (rc.canSenseLocation(next)) {
                     MapInfo mi = rc.senseMapInfo(next);
                     if (mi.getPaint().isAlly()) paintScore = 2;
                     else if (mi.getPaint() == PaintType.EMPTY) paintScore = 1;
-                    else paintScore = -1; // enemy paint drains us
+                    else paintScore = -1;
                 }
                 if (dist < bestDist || (dist == bestDist && paintScore > bestPaintScore)) {
                     bestDist = dist;
@@ -700,27 +806,49 @@ public class RobotPlayer {
                 rc.move(bestDir);
                 return;
             }
-            // greedy failed, start bug pathfinding
+            // greedy failed — start Bug2 wall following
             bugFollowing = true;
-            bugDir = rc.getLocation().directionTo(target);
+            bugWallDir = rc.getLocation().directionTo(target);
             bugStartDist = curDist;
+            bugBestDist = curDist;
             bugTurns = 0;
+            bugPrevLoc = rc.getLocation();
         }
 
-        // bug: try rotating right from the blocked direction to find a way around
+        // Bug2 wall following
         if (bugFollowing) {
             bugTurns++;
-            Direction dir = bugDir;
+            if (curDist < bugBestDist) bugBestDist = curDist;
+
+            // detect stuck in same spot
+            if (bugPrevLoc != null && rc.getLocation().equals(bugPrevLoc) && bugTurns > 2) {
+                bugRotateRight = !bugRotateRight;
+            }
+            bugPrevLoc = rc.getLocation();
+
+            // first try moving directly toward target (in case wall ended)
+            Direction toward = rc.getLocation().directionTo(target);
+            if (rc.canMove(toward)) {
+                rc.move(toward);
+                bugFollowing = false; // wall ended, back to greedy
+                return;
+            }
+
+            // wall follow: rotate from toward-target to find an opening
+            Direction dir = toward;
             for (int i = 0; i < 8; i++) {
+                dir = bugRotateRight ? dir.rotateRight() : dir.rotateLeft();
                 if (rc.canMove(dir)) {
                     rc.move(dir);
-                    // next time, try going left of the wall we just passed
-                    bugDir = dir.rotateLeft().rotateLeft();
+                    // set next wall dir: the wall is on our inner side
+                    bugWallDir = bugRotateRight
+                        ? dir.rotateLeft().rotateLeft()
+                        : dir.rotateRight().rotateRight();
                     return;
                 }
-                dir = dir.rotateRight();
             }
-            // completely stuck, reset bug
+            // completely stuck, flip and reset
+            bugRotateRight = !bugRotateRight;
             bugFollowing = false;
         }
     }
@@ -851,11 +979,22 @@ public class RobotPlayer {
 
     static MapLocation findNearestUnbuiltRuin(RobotController rc) throws GameActionException {
         MapLocation[] ruins = rc.senseNearbyRuins(-1);
+        RobotInfo[] enemies = rc.senseNearbyRobots(-1, rc.getTeam().opponent());
         MapLocation closest = null;
         int closestDist = Integer.MAX_VALUE;
         for (MapLocation ruin : ruins) {
             RobotInfo occupant = rc.senseRobotAtLocation(ruin);
             if (occupant != null && occupant.getType().isTowerType()) continue;
+
+            // skip ruins near enemy towers — building there is suicide
+            boolean nearEnemyTower = false;
+            for (RobotInfo enemy : enemies) {
+                if (enemy.type.isTowerType() && ruin.distanceSquaredTo(enemy.location) <= 36) {
+                    nearEnemyTower = true;
+                    break;
+                }
+            }
+            if (nearEnemyTower) continue;
 
             // skip ruins with too many allies nearby (anti-crowding)
             RobotInfo[] nearRuin = rc.senseNearbyRobots(ruin, 8, rc.getTeam());
@@ -920,7 +1059,7 @@ public class RobotPlayer {
     //                   SRP RESOURCE PATTERN
     // ================================================================
     static boolean shouldUseSecond(MapLocation loc, MapLocation center) {
-        return resourcePat[2 + (loc.x - center.x)][2 + (loc.y - center.y)];
+        return SRP_PATTERN[2 + (loc.x - center.x)][2 + (loc.y - center.y)] == 2;
     }
 
     // figure out if a tile is in range of a nearby resource pattern center
@@ -939,94 +1078,90 @@ public class RobotPlayer {
         return false;
     }
 
-    // try to start an SRP at current location
+    // SRP pattern (from bot_2_5): 2=secondary, 1=primary
+    static final int[][] SRP_PATTERN = {
+        {2,2,1,2,2},{2,1,1,1,2},{1,1,2,1,1},{2,1,1,1,2},{2,2,1,2,2}
+    };
+
+    // find a valid SRP center nearby (grid-aligned search like bot_2_5)
     static void tryStartSRP(RobotController rc) throws GameActionException {
         if (markedResource != null) return;
-        if (!(rc.getNumberTowers() > 2 || rc.getRoundNum() > 100)) return;
+        if (rc.getNumberTowers() < 3) return;
 
         MapLocation myloc = rc.getLocation();
-        MapInfo[] near = rc.senseNearbyMapInfos();
 
-        // check 5x5 area is clear (no walls, enemy paint, ruins, existing SRP centers)
-        for (int i = -2; i <= 2; i++) {
-            for (int j = -2; j <= 2; j++) {
-                MapLocation tmp = new MapLocation(myloc.x + i, myloc.y + j);
-                if (!rc.canSenseLocation(tmp)) return;
-                MapInfo mi = rc.senseMapInfo(tmp);
-                if (!mi.isPassable()) return;
-                if (mi.getPaint().isEnemy()) return;
-                if (mi.isResourcePatternCenter()) return;
-                RobotInfo r = rc.senseRobotAtLocation(tmp);
-                if (r != null && r.getType().isTowerType()) return;
-            }
-        }
+        // check grid-aligned centers near our position (like bot_2_5)
+        for (int dx = -4; dx <= 4; dx += 4) {
+            for (int dy = -4; dy <= 4; dy += 4) {
+                if (Clock.getBytecodesLeft() < 3000) return;
+                // snap to grid
+                MapLocation center = new MapLocation(
+                    ((myloc.x + dx + 2) / 4) * 4 + 2,
+                    ((myloc.y + dy + 2) / 4) * 4 + 2);
+                if (!rc.onTheMap(center)) continue;
+                if (myloc.distanceSquaredTo(center) > 20) continue;
+                if (!rc.canMarkResourcePattern(center)) continue;
 
-        // check no overlap with existing marked SRP
-        for (MapInfo tile : near) {
-            if (tile.getMark() == PaintType.ALLY_PRIMARY) {
-                MapLocation markLoc = tile.getMapLocation();
-                // check if our 5x5 overlaps with that mark's 5x5
-                if (Math.abs(markLoc.x - myloc.x) <= 4 && Math.abs(markLoc.y - myloc.y) <= 4) {
+                // check 5x5 area: no enemy paint, not all done
+                boolean bad = false;
+                boolean allDone = true;
+                for (int x = -2; x <= 2 && !bad; x++) {
+                    for (int y = -2; y <= 2 && !bad; y++) {
+                        MapLocation tile = center.translate(x, y);
+                        if (!rc.canSenseLocation(tile)) { allDone = false; continue; }
+                        MapInfo info = rc.senseMapInfo(tile);
+                        if (info.getPaint().isEnemy()) { bad = true; break; }
+                        boolean wantSec = SRP_PATTERN[x + 2][y + 2] == 2;
+                        PaintType want = wantSec ? PaintType.ALLY_SECONDARY : PaintType.ALLY_PRIMARY;
+                        if (info.getPaint() != want) allDone = false;
+                    }
+                }
+                if (!bad && !allDone) {
+                    markedResource = center;
                     return;
                 }
             }
-        }
-
-        if (rc.canMark(myloc)) {
-            rc.mark(myloc, false);
-            markedResource = myloc;
         }
     }
 
-    // paint the SRP pattern
+    // paint the SRP pattern tiles and complete when done
     static void makeResourcePatch(RobotController rc) throws GameActionException {
+        if (markedResource == null) return;
         MapLocation myloc = rc.getLocation();
 
-        if (!myloc.equals(markedResource)) {
+        // move toward center if far
+        if (myloc.distanceSquaredTo(markedResource) > 8) {
             moveToward(rc, markedResource);
         }
 
-        MapLocation goal = null;
-        int bestDist = Integer.MAX_VALUE;
-        boolean secondCol = false;
-
-        for (int i = -2; i <= 2; i++) {
-            for (int j = -2; j <= 2; j++) {
-                MapLocation tmp = new MapLocation(markedResource.x + i, markedResource.y + j);
-                if (!rc.canSenseLocation(tmp)) continue;
-                MapInfo mi = rc.senseMapInfo(tmp);
-                if (!mi.isPassable()) continue;
-                if (mi.getPaint().isEnemy()) {
-                    markedResource = null;
-                    return;
-                }
-                boolean wantSecondary = shouldUseSecond(tmp, markedResource);
-                if (mi.getPaint().isAlly()) {
-                    if (wantSecondary == (mi.getPaint() == PaintType.ALLY_SECONDARY)) {
-                        continue; // already correct
+        // paint tiles using SRP_PATTERN
+        if (rc.isActionReady()) {
+            paintLoop:
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dy = -2; dy <= 2; dy++) {
+                    if (Clock.getBytecodesLeft() < 1500) break paintLoop;
+                    MapLocation tile = markedResource.translate(dx, dy);
+                    if (!rc.canSenseLocation(tile)) continue;
+                    MapInfo info = rc.senseMapInfo(tile);
+                    if (info.hasRuin() || info.isWall()) continue;
+                    if (info.getPaint().isEnemy()) {
+                        markedResource = null; // enemy paint, give up
+                        return;
                     }
-                }
-                int d = rc.getLocation().distanceSquaredTo(tmp);
-                if (d < bestDist) {
-                    bestDist = d;
-                    goal = tmp;
-                    secondCol = wantSecondary;
+                    boolean wantSecondary = SRP_PATTERN[dx + 2][dy + 2] == 2;
+                    PaintType want = wantSecondary ? PaintType.ALLY_SECONDARY : PaintType.ALLY_PRIMARY;
+                    if (info.getPaint() != want && rc.canAttack(tile)) {
+                        rc.attack(tile, wantSecondary);
+                        break paintLoop; // painted one tile, done for this turn
+                    }
                 }
             }
         }
 
-        if (goal != null) {
-            if (rc.canAttack(goal)) {
-                rc.attack(goal, secondCol);
-            }
-            if (rc.canCompleteResourcePattern(markedResource)) {
-                rc.completeResourcePattern(markedResource);
-                markedResource = null;
-            }
-        } else {
-            if (rc.canCompleteResourcePattern(markedResource)) {
-                rc.completeResourcePattern(markedResource);
-            }
+        // try to complete
+        if (myloc.distanceSquaredTo(markedResource) <= 2
+            && rc.canCompleteResourcePattern(markedResource)) {
+            rc.completeResourcePattern(markedResource);
             markedResource = null;
         }
     }
@@ -1112,9 +1247,9 @@ public class RobotPlayer {
             return;
         }
 
-        // tile scoring: enemy=-2 (best), empty=-1, ally=0
+        // tile scoring: enemy=3 (best to mop), empty=1, ally=0 (already clean)
         int bestDist = Integer.MAX_VALUE;
-        int bestScore = -10000;
+        int bestScore = -1;
         Direction bestDir = null;
 
         for (Direction dir : directions) {
@@ -1123,9 +1258,9 @@ public class RobotPlayer {
             MapInfo mi = rc.senseMapInfo(nloc);
             int score;
             PaintType p = mi.getPaint();
-            if (p.isEnemy()) score = -2;
-            else if (p == PaintType.EMPTY) score = -1;
-            else score = 0;
+            if (p.isEnemy()) score = 3;       // want to step on enemy paint to mop it
+            else if (p == PaintType.EMPTY) score = 1;
+            else score = 0;                    // ally paint, nothing to do
 
             int dist = nloc.distanceSquaredTo(target);
             if (score > bestScore || (score == bestScore && dist < bestDist)) {
@@ -1329,6 +1464,30 @@ public class RobotPlayer {
         return false;
     }
 
+    // emergency: move to nearest ally or empty tile to stop dying on enemy paint
+    static void fleeToAllyPaint(RobotController rc) throws GameActionException {
+        if (!rc.isMovementReady()) return;
+        Direction bestDir = null;
+        int bestScore = -999;
+        for (Direction dir : directions) {
+            if (!rc.canMove(dir)) continue;
+            MapLocation next = rc.getLocation().add(dir);
+            if (!rc.canSenseLocation(next)) continue;
+            MapInfo mi = rc.senseMapInfo(next);
+            int score = 0;
+            if (mi.getPaint().isAlly()) score = 3;
+            else if (mi.getPaint() == PaintType.EMPTY) score = 1;
+            else score = -1; // still enemy
+            if (score > bestScore) {
+                bestScore = score;
+                bestDir = dir;
+            }
+        }
+        if (bestDir != null && bestScore > -1) {
+            rc.move(bestDir);
+        }
+    }
+
     // ================================================================
     //                  SHARED PAINT HELPERS
     // ================================================================
@@ -1357,6 +1516,23 @@ public class RobotPlayer {
                 }
             }
             if (nearEnemyTower) continue;
+            int dist = rc.getLocation().distanceSquaredTo(loc);
+            if (dist < bestDist) {
+                bestDist = dist;
+                best = loc;
+            }
+        }
+        return best;
+    }
+
+    static MapLocation findNearestEmptyPaint(RobotController rc) throws GameActionException {
+        MapInfo[] tiles = rc.senseNearbyMapInfos();
+        MapLocation best = null;
+        int bestDist = Integer.MAX_VALUE;
+        for (MapInfo tile : tiles) {
+            if (tile.getPaint() != PaintType.EMPTY) continue;
+            if (tile.isWall() || tile.hasRuin()) continue;
+            MapLocation loc = tile.getMapLocation();
             int dist = rc.getLocation().distanceSquaredTo(loc);
             if (dist < bestDist) {
                 bestDist = dist;
