@@ -1,13 +1,8 @@
 package examplefuncsplayer;
 
 import battlecode.common.*;
-
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Map;
 import java.util.Random;
-import java.util.Set;
+
 
 
 /**
@@ -234,21 +229,50 @@ public class RobotPlayer {
      * Run a single turn for a Mopper.
      * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
      */
-    public static void runMopper(RobotController rc) throws GameActionException{
-        // Move and attack randomly.
-        Direction dir = directions[rng.nextInt(directions.length)];
-        MapLocation nextLoc = rc.getLocation().add(dir);
-        if (rc.canMove(dir)){
-            rc.move(dir);
+    // Mopper action for one turn
+    public static void runMopper(RobotController rc) throws GameActionException {
+
+        MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
+        MapLocation myLoc = rc.getLocation();
+
+        MapLocation enemyPaint = null;
+        int bestDist = Integer.MAX_VALUE;
+
+        // Find the nearest enemy paint
+        for (MapInfo tile : nearbyTiles) {
+            if (tile.getPaint().isEnemy()) {
+                int dist = myLoc.distanceSquaredTo(tile.getMapLocation());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    enemyPaint = tile.getMapLocation();
+                }
+            }
         }
-        if (rc.canMopSwing(dir)){
-            rc.mopSwing(dir);
-            System.out.println("Mop Swing! Booyah!");
+
+        // Priority 1: clean enemy paint
+        if (enemyPaint != null) {
+            if (rc.canAttack(enemyPaint)) {
+                rc.attack(enemyPaint);
+                rc.setIndicatorString("Cleaning enemy paint");
+                return;
+            } else {
+                moveToward(rc, enemyPaint);
+                return;
+            }
         }
-        else if (rc.canAttack(nextLoc)){
-            rc.attack(nextLoc);
+
+        // Priority 2: use mop swing if possible
+        for (Direction dir : directions) {
+            if (rc.canMopSwing(dir)) {
+                rc.mopSwing(dir);
+                rc.setIndicatorString("Mopper swing");
+                return;
+            }
         }
-        // We can also move our code into different methods or classes to better organize it!
+
+        // Priority 3: random movement if nothing to do
+        randomMove(rc);
+
         updateEnemyRobots(rc);
     }
 
