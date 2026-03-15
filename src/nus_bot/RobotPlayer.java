@@ -7,7 +7,6 @@ import java.util.Random;
 public class RobotPlayer {
 
     // global stuff
-    static int turnCount = 0;
     static final Random rng = new Random();
     static final Direction[] directions = {
         Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
@@ -26,14 +25,10 @@ public class RobotPlayer {
     static int botSpawnedCount = 0;
     static boolean mopperRequested = false;
     static MapLocation requestedMopLoc = null;
-    static int lastSpawnRound = -10;
-    static final int SPAWN_COOLDOWN = 0;
-    static final int TOWER_PAINT_RESERVE = 100;
 
     // home/refuel system (like mopper_and_srp RefuelManager)
     static MapLocation home = null;
     static int homeState = 0; // 0=ruin, 1=non-paint tower, 2=paint tower
-    static boolean reachedHome = false;
     static boolean shouldGoHome = false;
     // returnLoc removed — was causing soldiers to walk back to already-built ruins
 
@@ -60,8 +55,6 @@ public class RobotPlayer {
     static MapLocation exploreTarget = null;
     static MapLocation splasherExploreTarget = null;
 
-    static boolean[][] moneyTowerPat = null;
-    static boolean[][] paintTowerPat = null;
 
     // refuel cooldown: don't re-enter refuel for N rounds after giving up
     static int refuelGiveUpRound = -100;
@@ -78,14 +71,7 @@ public class RobotPlayer {
         // unique RNG per robot (like mopper_and_srp Globals.java)
         rng.setSeed((long) rc.getID());
 
-        // init patterns once
-        if (!rc.getType().isTowerType()) {
-            moneyTowerPat = rc.getTowerPattern(UnitType.LEVEL_ONE_MONEY_TOWER);
-            paintTowerPat = rc.getTowerPattern(UnitType.LEVEL_ONE_PAINT_TOWER);
-        }
-
         while (true) {
-            turnCount += 1;
             try {
                 switch (rc.getType()) {
                     case SOLDIER:  runSoldier(rc);  break;
@@ -160,7 +146,6 @@ public class RobotPlayer {
     static void towerSpawn(RobotController rc) throws GameActionException {
         if (!rc.isActionReady()) return;
         int round = rc.getRoundNum();
-        if (!mopperRequested && round - lastSpawnRound < SPAWN_COOLDOWN) return;
 
         UnitType toBuild;
         if (mopperRequested) {
@@ -185,7 +170,6 @@ public class RobotPlayer {
             if (rc.canBuildRobot(toBuild, spawnLoc)) {
                 rc.buildRobot(toBuild, spawnLoc);
                 botSpawnedCount++;
-                lastSpawnRound = round;
                 if (mopperRequested && toBuild == UnitType.MOPPER) {
                     mopperRequested = false;
                 }
@@ -299,7 +283,7 @@ public class RobotPlayer {
                    && rc.getRoundNum() - refuelGiveUpRound >= 10) {
             // paint dropped below threshold, go refuel
             shouldGoHome = true;
-            reachedHome = false;
+
             refuelWaitTurns = 0;
         }
 
@@ -422,7 +406,7 @@ public class RobotPlayer {
         } else if (myPaint <= paintCap / 5 && !shouldGoHome
                    && rc.getRoundNum() - refuelGiveUpRound >= 15) {
             shouldGoHome = true;
-            reachedHome = false;
+
         }
 
         // refuel
@@ -512,7 +496,7 @@ public class RobotPlayer {
         } else if (myPaint <= paintCap / 3 && !shouldGoHome
                    && rc.getRoundNum() - refuelGiveUpRound >= 10) {
             shouldGoHome = true;
-            reachedHome = false;
+
             refuelWaitTurns = 0;
         }
 
@@ -671,7 +655,7 @@ public class RobotPlayer {
             if (home == null || ts >= homeState) {
                 home = ruin;
                 homeState = ts;
-                reachedHome = false;
+    
             }
         }
     }
@@ -807,8 +791,6 @@ public class RobotPlayer {
     //                    MOVEMENT: moveToward (greedy + Bug2)
     // ================================================================
     static boolean bugFollowing = false;
-    static Direction bugWallDir = null;
-    static int bugStartDist = Integer.MAX_VALUE;
     static int bugBestDist = Integer.MAX_VALUE;
     static int bugTurns = 0;
     static boolean bugRotateRight = true;
@@ -904,8 +886,6 @@ public class RobotPlayer {
             }
             // greedy failed — start Bug2 wall following
             bugFollowing = true;
-            bugWallDir = myLoc.directionTo(target);
-            bugStartDist = curDist;
             bugBestDist = curDist;
             bugTurns = 0;
             bugPrevLoc = myLoc;
@@ -956,9 +936,6 @@ public class RobotPlayer {
                 dir = bugRotateRight ? dir.rotateRight() : dir.rotateLeft();
                 if (rc.canMove(dir)) {
                     rc.move(dir);
-                    bugWallDir = bugRotateRight
-                        ? dir.rotateLeft().rotateLeft()
-                        : dir.rotateRight().rotateRight();
                     return;
                 }
             }
@@ -1534,36 +1511,6 @@ public class RobotPlayer {
             splasherExploreTarget = new MapLocation(rng.nextInt(mapW), rng.nextInt(mapH));
         }
         moveToward(rc, splasherExploreTarget);
-    }
-
-    static void splasherPushFrontier(RobotController rc) throws GameActionException {
-        if (!rc.isMovementReady()) return;
-        MapLocation myloc = rc.getLocation();
-
-        // find direction with most non-ally tiles at the edge of vision
-        Direction bestDir = null;
-        int bestEmpty = -1;
-        for (Direction dir : Direction.allDirections()) {
-            if (dir == Direction.CENTER) continue;
-            if (!rc.canMove(dir)) continue;
-            MapLocation next = myloc.add(dir);
-            // count non-ally tiles in a cone ahead
-            int emptyCount = 0;
-            for (MapInfo tile : rc.senseNearbyMapInfos(next, 8)) {
-                PaintType p = tile.getPaint();
-                if (p == PaintType.EMPTY || p.isEnemy()) emptyCount++;
-            }
-            if (emptyCount > bestEmpty) {
-                bestEmpty = emptyCount;
-                bestDir = dir;
-            }
-        }
-        if (bestDir != null && bestEmpty > 0) {
-            rc.move(bestDir);
-        } else {
-            // truly nothing — explore to a new area
-            explore(rc);
-        }
     }
 
     static MapLocation findNearestEnemyPaint(RobotController rc) throws GameActionException {
