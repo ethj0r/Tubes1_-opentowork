@@ -1,4 +1,4 @@
-package nus_bot;
+package main_bot;
 
 import battlecode.common.*;
 

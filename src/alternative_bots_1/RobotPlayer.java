@@ -1,4 +1,4 @@
-package jor_bot_v1;
+package alternative_bots_1;
 import battlecode.common.*;
 import java.util.Random;
 
