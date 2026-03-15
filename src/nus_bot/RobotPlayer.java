@@ -58,10 +58,8 @@ public class RobotPlayer {
 
     // explore target (random map location like mopper_and_srp)
     static MapLocation exploreTarget = null;
+    static MapLocation splasherExploreTarget = null;
 
-    // SRP resource pattern
-    static MapLocation markedResource = null;
-    static int srpBuildTurns = 0;
     static boolean[][] moneyTowerPat = null;
     static boolean[][] paintTowerPat = null;
 
@@ -167,11 +165,18 @@ public class RobotPlayer {
         UnitType toBuild;
         if (mopperRequested) {
             toBuild = UnitType.MOPPER;
+        } else if (round < 200) {
+            // early game: mostly soldiers to build towers
+            // cycle: sol, sol, sol, mop (4-cycle)
+            int idx = botSpawnedCount % 4;
+            if (idx == 3) toBuild = UnitType.MOPPER;
+            else toBuild = UnitType.SOLDIER;
         } else {
-            // cycle: sol, sol, splasher, sol, sol, mop (6-cycle)
-            int idx = botSpawnedCount % 6;
-            if (idx == 5) toBuild = UnitType.SPLASHER;
-            else if (idx == 2) toBuild = UnitType.MOPPER;
+            // mid/late game: more splashers for painting
+            // cycle: sol, splasher, sol, splasher, mop (5-cycle)
+            int idx = botSpawnedCount % 5;
+            if (idx == 4) toBuild = UnitType.MOPPER;
+            else if (idx == 1 || idx == 3) toBuild = UnitType.SPLASHER;
             else toBuild = UnitType.SOLDIER;
         }
 
@@ -238,7 +243,6 @@ public class RobotPlayer {
         if (soldierStuckTurns >= 3) {
             // force clear ALL targets — soldier is trapped, must explore out
             targetRuin = null; targetTowerType = null;
-            markedResource = null;
             attackTarget = null;
             ruinBuildTurns = 0;
             soldierStuckTurns = 0;
@@ -323,7 +327,7 @@ public class RobotPlayer {
         }
 
         // tower building
-        if (rc.getNumberTowers() < 25 && markedResource == null) {
+        if (rc.getNumberTowers() < 25) {
             if (targetRuin == null) {
                 targetRuin = findNearestUnbuiltRuin(rc);
                 ruinBuildTurns = 0;
@@ -334,14 +338,6 @@ public class RobotPlayer {
                 return;
             }
         }
-
-        // SRP disabled
-        // tryStartSRP(rc);
-        // if (markedResource != null) {
-        //     makeResourcePatch(rc);
-        //     soldierPostTurn(rc);
-        //     return;
-        // }
 
         // help nearby tower patterns
         tryHelpNearbyPattern(rc);
@@ -374,8 +370,6 @@ public class RobotPlayer {
                 targetRuin = null; targetTowerType = null;
             }
         }
-        // complete SRP patterns nearby
-        checkCompleteResourcePatterns(rc);
     }
 
     // ================================================================
@@ -558,24 +552,22 @@ public class RobotPlayer {
         // splash before moving (might be in range already)
         splasherDoAttack(rc);
 
-        // if too many ally splashers very close, spread out
-        RobotInfo[] nearAllies = rc.senseNearbyRobots(8, rc.getTeam());
-        int nearbySplashers = 0;
-        for (RobotInfo a : nearAllies) {
-            if (a.type == UnitType.SPLASHER) nearbySplashers++;
-        }
-
-        // move toward enemy/empty paint, or push to frontier
+        // movement priority:
+        // 1. if enemy paint nearby, go paint over it
+        // 2. if empty tiles nearby, go paint them
+        // 3. otherwise, pick a far target and walk there (don't orbit base)
         MapLocation enemyPaint = findNearestEnemyPaint(rc);
-        if (enemyPaint != null && nearbySplashers < 3) {
+        if (enemyPaint != null) {
             moveToward(rc, enemyPaint);
+            splasherExploreTarget = null;
         } else {
             MapLocation emptyPaint = findNearestEmptyPaint(rc);
-            if (emptyPaint != null && nearbySplashers < 3) {
+            if (emptyPaint != null) {
                 moveToward(rc, emptyPaint);
+                splasherExploreTarget = null;
             } else {
-                // all nearby tiles are ally paint — push toward frontier
-                splasherPushFrontier(rc);
+                // everything nearby is ally paint — commit to a far target
+                splasherExplore(rc);
             }
         }
 
@@ -1221,115 +1213,6 @@ public class RobotPlayer {
         {2,2,1,2,2},{2,1,1,1,2},{1,1,2,1,1},{2,1,1,1,2},{2,2,1,2,2}
     };
 
-    // find a valid SRP center nearby (grid-aligned search like bot_2_5)
-    static void tryStartSRP(RobotController rc) throws GameActionException {
-        if (markedResource != null) return;
-        if (rc.getNumberTowers() < 3) return;
-
-        MapLocation myloc = rc.getLocation();
-
-        // check grid-aligned centers near our position (like bot_2_5)
-        for (int dx = -4; dx <= 4; dx += 4) {
-            for (int dy = -4; dy <= 4; dy += 4) {
-                if (Clock.getBytecodesLeft() < 3000) return;
-                // snap to grid
-                MapLocation center = new MapLocation(
-                    ((myloc.x + dx + 2) / 4) * 4 + 2,
-                    ((myloc.y + dy + 2) / 4) * 4 + 2);
-                if (!rc.onTheMap(center)) continue;
-                if (myloc.distanceSquaredTo(center) > 20) continue;
-                if (!rc.canMarkResourcePattern(center)) continue;
-
-                // check 5x5 area: no enemy paint, not all done
-                boolean bad = false;
-                boolean allDone = true;
-                for (int x = -2; x <= 2 && !bad; x++) {
-                    for (int y = -2; y <= 2 && !bad; y++) {
-                        MapLocation tile = center.translate(x, y);
-                        if (!rc.canSenseLocation(tile)) { allDone = false; continue; }
-                        MapInfo info = rc.senseMapInfo(tile);
-                        if (info.getPaint().isEnemy()) { bad = true; break; }
-                        boolean wantSec = SRP_PATTERN[x + 2][y + 2] == 2;
-                        PaintType want = wantSec ? PaintType.ALLY_SECONDARY : PaintType.ALLY_PRIMARY;
-                        if (info.getPaint() != want) allDone = false;
-                    }
-                }
-                if (!bad && !allDone) {
-                    markedResource = center;
-                    srpBuildTurns = 0;
-                    return;
-                }
-            }
-        }
-    }
-
-    // paint the SRP pattern tiles and complete when done
-    static void makeResourcePatch(RobotController rc) throws GameActionException {
-        if (markedResource == null) return;
-        srpBuildTurns++;
-        // timeout: give up SRP after 10 turns
-        if (srpBuildTurns > 10) {
-            markedResource = null;
-            srpBuildTurns = 0;
-            return;
-        }
-        MapLocation myloc = rc.getLocation();
-
-        // move toward center if far
-        if (myloc.distanceSquaredTo(markedResource) > 8) {
-            moveToward(rc, markedResource);
-        }
-
-        // paint tiles using SRP_PATTERN
-        if (rc.isActionReady()) {
-            paintLoop:
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dy = -2; dy <= 2; dy++) {
-                    if (Clock.getBytecodesLeft() < 1500) break paintLoop;
-                    MapLocation tile = markedResource.translate(dx, dy);
-                    if (!rc.canSenseLocation(tile)) continue;
-                    MapInfo info = rc.senseMapInfo(tile);
-                    if (info.hasRuin() || info.isWall()) continue;
-                    if (info.getPaint().isEnemy()) {
-                        markedResource = null; // enemy paint, give up
-                        return;
-                    }
-                    boolean wantSecondary = SRP_PATTERN[dx + 2][dy + 2] == 2;
-                    PaintType want = wantSecondary ? PaintType.ALLY_SECONDARY : PaintType.ALLY_PRIMARY;
-                    if (info.getPaint() != want && rc.canAttack(tile)) {
-                        rc.attack(tile, wantSecondary);
-                        break paintLoop; // painted one tile, done for this turn
-                    }
-                }
-            }
-        }
-
-        // try to complete
-        if (myloc.distanceSquaredTo(markedResource) <= 2
-            && rc.canCompleteResourcePattern(markedResource)) {
-            rc.completeResourcePattern(markedResource);
-            markedResource = null;
-        }
-    }
-
-    // complete any resource patterns nearby
-    static void checkCompleteResourcePatterns(RobotController rc) throws GameActionException {
-        MapLocation myloc = rc.getLocation();
-        for (int dx = -2; dx <= 2; dx++) {
-            for (int dy = -2; dy <= 2; dy++) {
-                MapLocation tmp = new MapLocation(myloc.x + dx, myloc.y + dy);
-                if (rc.canSenseLocation(tmp)) {
-                    MapInfo mi = rc.senseMapInfo(tmp);
-                    if (mi.getMark() == PaintType.ALLY_PRIMARY) {
-                        if (rc.canCompleteResourcePattern(tmp)) {
-                            rc.completeResourcePattern(tmp);
-                            return;
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     // ================================================================
     //                    MOPPER HELPERS
@@ -1638,6 +1521,21 @@ public class RobotPlayer {
     //                  SHARED PAINT HELPERS
     // ================================================================
     // when all nearby tiles are ally paint, move toward the edge of painted territory
+    // splasher-specific explore: pick a random far point and walk there
+    static void splasherExplore(RobotController rc) throws GameActionException {
+        if (!rc.isMovementReady()) return;
+        MapLocation myloc = rc.getLocation();
+        int mapW = rc.getMapWidth();
+        int mapH = rc.getMapHeight();
+
+        // pick a new target if we don't have one or we're close to it
+        if (splasherExploreTarget == null || myloc.distanceSquaredTo(splasherExploreTarget) <= 8) {
+            // pick a completely random point on the map — forces splashers to spread
+            splasherExploreTarget = new MapLocation(rng.nextInt(mapW), rng.nextInt(mapH));
+        }
+        moveToward(rc, splasherExploreTarget);
+    }
+
     static void splasherPushFrontier(RobotController rc) throws GameActionException {
         if (!rc.isMovementReady()) return;
         MapLocation myloc = rc.getLocation();
