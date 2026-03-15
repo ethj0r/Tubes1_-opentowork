@@ -38,14 +38,6 @@ public class RobotPlayer {
         Direction.SOUTH, Direction.SOUTHWEST,Direction.WEST,
         Direction.NORTHWEST,
     };
-
-    /**
-     * run() is the method that is called when a robot is instantiated in the Battlecode world.
-     * It is like the main function for your robot. If this method returns, the robot dies!
-     *
-     * @param rc  The RobotController object. You use it to perform actions from this robot, and to get
-     *            information on its current status. Essentially your portal to interacting with the world.
-     **/
     @SuppressWarnings("unused")
     public static void run(RobotController rc) throws GameActionException {
         // Hello world! Standard output is very useful for debugging.
@@ -98,11 +90,6 @@ public class RobotPlayer {
 
         // Your code should never reach here (unless it's intentional)! Self-destruction imminent...
     }
-
-    /**
-     * Run a single turn for towers.
-     * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
-     */
     
         // Tower action for one turn
     public static void runTower(RobotController rc) throws GameActionException {
@@ -146,10 +133,6 @@ public class RobotPlayer {
             }
     }
 
-    /**
-     * Run a single turn for a Soldier.
-     * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
-     */
     // Soldier action for one turn
     public static void runSoldier(RobotController rc) throws GameActionException {
         MapLocation ruinLoc = findNearestRuin(rc);
