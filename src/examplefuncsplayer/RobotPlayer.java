@@ -5,25 +5,10 @@ import java.util.Random;
 
 
 
-/**
- * RobotPlayer is the class that describes your main robot strategy.
- * The run() method inside this class is like your main function: this is what we'll call once your robot
- * is created!
- */
-public class RobotPlayer {
-    /**
-     * We will use this variable to count the number of turns this robot has been alive.
-     * You can use static variables like this to save any information you want. Keep in mind that even though
-     * these variables are static, in Battlecode they aren't actually shared between your robots.
-     */
-    static int turnCount = 0;
 
-    /**
-     * A random number generator.
-     * We will use this RNG to make some random moves. The Random class is provided by the java.util.Random
-     * import at the top of this file. Here, we *seed* the RNG with a constant number (6147); this makes sure
-     * we get the same sequence of numbers every time this code is run. This is very useful for debugging!
-     */
+public class RobotPlayer {
+    
+    static int turnCount = 0;
     static final Random rng = new Random(6147);
 
     /** Array containing all the possible movement directions. */
@@ -291,7 +276,7 @@ public class RobotPlayer {
             }
         }
     }
-
+    // Move randomly to any possible direction
     public static void randomMove(RobotController rc) throws GameActionException {
     for (int i = 0; i < directions.length; i++) {
         Direction dir = directions[rng.nextInt(directions.length)];
@@ -301,7 +286,7 @@ public class RobotPlayer {
             }
         }
     }
-
+    // Move toward the target, or try nearby directions if blocked
     public static void moveToward(RobotController rc, MapLocation target) throws GameActionException {
         Direction dir = rc.getLocation().directionTo(target);
         if (rc.canMove(dir)) {
@@ -324,7 +309,7 @@ public class RobotPlayer {
 
         randomMove(rc);
     }
-
+    // Find the closest ruin
     public static MapLocation findNearestRuin(RobotController rc) throws GameActionException {
     MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
     MapLocation myLoc = rc.getLocation();
@@ -343,7 +328,7 @@ public class RobotPlayer {
         }
     return bestRuin;
     }
-
+    // Find the nearest tile that is not ally-painted
     public static MapLocation findNearestNonAllyTile(RobotController rc) throws GameActionException {
     MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
     MapLocation myLoc = rc.getLocation();
@@ -362,6 +347,7 @@ public class RobotPlayer {
         }
     return bestTile;
     }
+    // Try to build a robot in any adjacent direction
     public static boolean tryBuildRobotAnywhere(RobotController rc, UnitType type) throws GameActionException {
         for (Direction dir : directions) {
             MapLocation nextLoc = rc.getLocation().add(dir);
@@ -372,6 +358,7 @@ public class RobotPlayer {
         }
     return false;
     }
+    // Greedy attack logic for Splasher
     public static void runSplasher(RobotController rc) throws GameActionException {
 
         MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
