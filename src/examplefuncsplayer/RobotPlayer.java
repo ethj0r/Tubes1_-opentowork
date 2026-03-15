@@ -28,13 +28,8 @@ public class RobotPlayer {
 
     /** Array containing all the possible movement directions. */
     static final Direction[] directions = {
-        Direction.NORTH,
-        Direction.NORTHEAST,
-        Direction.EAST,
-        Direction.SOUTHEAST,
-        Direction.SOUTH,
-        Direction.SOUTHWEST,
-        Direction.WEST,
+        Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
+        Direction.SOUTH, Direction.SOUTHWEST,Direction.WEST,
         Direction.NORTHWEST,
     };
 
@@ -107,33 +102,33 @@ public class RobotPlayer {
     public static void runTower(RobotController rc) throws GameActionException {
             int round = rc.getRoundNum();
 
-            // Early game: build Soldiers first
+            // Build Soldiers first
             if (round < 80) {
                 if (tryBuildRobotAnywhere(rc, UnitType.SOLDIER)) {
-                    rc.setIndicatorString("EARLY: built SOLDIER");
+                    rc.setIndicatorString("Built SOLDIER");
                 }
             }
-            // Mid game: mix Soldiers and Moppers
+            // Mix Soldiers and Moppers
             else if (round < 160) {
                 if (round % 3 == 0) {
                     if (tryBuildRobotAnywhere(rc, UnitType.MOPPER)) {
-                        rc.setIndicatorString("MID: built MOPPER");
+                        rc.setIndicatorString("Built MOPPER");
                     }
                 } else {
                     if (tryBuildRobotAnywhere(rc, UnitType.SOLDIER)) {
-                        rc.setIndicatorString("MID: built SOLDIER");
+                        rc.setIndicatorString("Built SOLDIER");
                     }
                 }
             }
-            // Late game: use Splashers for bigger area control
+            // Use Splashers for bigger area control
             else {
                 if (round % 2 == 0) {
                     if (tryBuildRobotAnywhere(rc, UnitType.SPLASHER)) {
-                        rc.setIndicatorString("LATE: built SPLASHER");
+                        rc.setIndicatorString("Built SPLASHER");
                     }
                 } else {
                     if (tryBuildRobotAnywhere(rc, UnitType.MOPPER)) {
-                        rc.setIndicatorString("LATE: built MOPPER");
+                        rc.setIndicatorString("Built MOPPER");
                     }
                 }
             }
@@ -249,11 +244,10 @@ public class RobotPlayer {
             }
         }
 
-        // Priority 1: clean enemy paint
+        // Clean enemy paint
         if (enemyPaint != null) {
             if (rc.canAttack(enemyPaint)) {
-                rc.attack(enemyPaint);
-                rc.setIndicatorString("Cleaning enemy paint");
+                rc.attack(enemyPaint); rc.setIndicatorString("Cleaning enemy paint");
                 return;
             } else {
                 moveToward(rc, enemyPaint);
@@ -261,16 +255,15 @@ public class RobotPlayer {
             }
         }
 
-        // Priority 2: use mop swing if possible
+        // Use mop swing if possible
         for (Direction dir : directions) {
             if (rc.canMopSwing(dir)) {
-                rc.mopSwing(dir);
-                rc.setIndicatorString("Mopper swing");
+                rc.mopSwing(dir); rc.setIndicatorString("Mopper swing");
                 return;
             }
         }
 
-        // Priority 3: random movement if nothing to do
+        // Random movement if nothing to do
         randomMove(rc);
 
         updateEnemyRobots(rc);
