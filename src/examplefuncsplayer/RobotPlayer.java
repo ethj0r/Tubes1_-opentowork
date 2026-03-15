@@ -91,7 +91,7 @@ public class RobotPlayer {
         // Your code should never reach here (unless it's intentional)! Self-destruction imminent...
     }
     
-        // Tower action for one turn
+    //==================TOWER========================
     public static void runTower(RobotController rc) throws GameActionException {
             int round = rc.getRoundNum();
 
@@ -132,8 +132,8 @@ public class RobotPlayer {
                 System.out.println("Tower received message: '#" + m.getSenderID() + " " + m.getBytes());
             }
     }
-
-    // Soldier action for one turn
+    
+    //===============SOLDIER==================
     public static void runSoldier(RobotController rc) throws GameActionException {
         MapLocation ruinLoc = findNearestRuin(rc);
 
@@ -209,11 +209,7 @@ public class RobotPlayer {
         randomMove(rc);
     }
 
-    /**
-     * Run a single turn for a Mopper.
-     * This code is wrapped inside the infinite loop in run(), so it is called once per turn.
-     */
-    // Mopper action for one turn
+    //=================MOPPER===================
     public static void runMopper(RobotController rc) throws GameActionException {
 
         MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
@@ -362,7 +358,7 @@ public class RobotPlayer {
         }
     return false;
     }
-    // Greedy attack logic for Splasher
+    //===============SPLASHER=====================
     public static void runSplasher(RobotController rc) throws GameActionException {
 
         MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
