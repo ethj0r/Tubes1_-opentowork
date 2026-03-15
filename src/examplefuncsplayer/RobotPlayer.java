@@ -35,8 +35,7 @@ public class RobotPlayer {
     /** Array containing all the possible movement directions. */
     static final Direction[] directions = {
         Direction.NORTH, Direction.NORTHEAST, Direction.EAST, Direction.SOUTHEAST,
-        Direction.SOUTH, Direction.SOUTHWEST,Direction.WEST,
-        Direction.NORTHWEST,
+        Direction.SOUTH, Direction.SOUTHWEST,Direction.WEST,Direction.NORTHWEST,
     };
     @SuppressWarnings("unused")
     public static void run(RobotController rc) throws GameActionException {
@@ -91,7 +90,7 @@ public class RobotPlayer {
         // Your code should never reach here (unless it's intentional)! Self-destruction imminent...
     }
     
-    //==================TOWER========================
+    //Tower
     public static void runTower(RobotController rc) throws GameActionException {
             int round = rc.getRoundNum();
 
@@ -133,7 +132,7 @@ public class RobotPlayer {
             }
     }
     
-    //===============SOLDIER==================
+    //Soldier
     public static void runSoldier(RobotController rc) throws GameActionException {
         MapLocation ruinLoc = findNearestRuin(rc);
 
@@ -209,7 +208,7 @@ public class RobotPlayer {
         randomMove(rc);
     }
 
-    //=================MOPPER===================
+    //Mopper
     public static void runMopper(RobotController rc) throws GameActionException {
 
         MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
@@ -358,7 +357,7 @@ public class RobotPlayer {
         }
     return false;
     }
-    //===============SPLASHER=====================
+    //Splasher
     public static void runSplasher(RobotController rc) throws GameActionException {
 
         MapInfo[] nearbyTiles = rc.senseNearbyMapInfos();
