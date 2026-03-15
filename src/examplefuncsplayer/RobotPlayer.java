@@ -3,8 +3,29 @@ package examplefuncsplayer;
 import battlecode.common.*;
 import java.util.Random;
 
-
-
+/**
+ * Core strategy:
+ * - Early game: towers build mostly Soldiers
+ * - Mid game: mix Soldiers and Moppers
+ * - Late game: switch to Splashers and Moppers
+ * - Soldiers prioritize ruins, then paint non-ally tiles
+ * - Moppers clean enemy paint, then use mop swing
+ * - Splashers choose the best attack tile using greedy scoring
+ *
+ * Key behaviors:
+ * - Move toward nearest ruin to build Money Towers
+ * - Paint tiles that are not yet ally-controlled
+ * - Clean enemy paint to protect map control
+ * - Use simple movement: forward, left, right, then random
+ * - Send enemy-count messages to nearby allies every 20 rounds
+ *
+ * Main improvements:
+ * - Phase-based tower spawning strategy
+ * - Automatic Money Tower construction by Soldiers
+ * - Greedy target selection for Splasher attacks
+ * - Enemy paint detection and cleanup by Moppers
+ * - Simple communication support between allied units
+ */
 
 public class RobotPlayer {
     
