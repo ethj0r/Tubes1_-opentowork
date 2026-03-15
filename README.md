@@ -1,53 +1,61 @@
-# Battlecode 2025 Scaffold - Java
+# Tubes1_-opentowork — Battlecode 2025
 
-This is the Battlecode 2025 Java scaffold, containing an `examplefuncsplayer`. Read https://play.battlecode.org/bc25java/quick_start !
+Bot player untuk kompetisi Battlecode 2025 menggunakan strategi Greedy. Terdapat tiga implementasi bot dengan heuristic greedy yang berbeda-beda.
 
+## Algoritma Greedy
 
-### Project Structure
+### `main_bot` — Economy-First Tower Expansion
+Strategi greedy yang memaksimalkan jumlah menara terlebih dahulu (target 25 menara) dengan rasio 2:1 paint:money tower sebelum melakukan ekspansi paint coverage masif menggunakan splasher. Menggunakan Bug2 navigation, dan communication protocol 3 message types antar-unit. Spawn cycle berubah dari 3:1 soldier:mopper (awal) ke 2:2:1 soldier:splasher:mopper (ronde 200+).
 
-- `README.md`
-    This file.
-- `build.gradle`
-    The Gradle build file used to build and run players.
-- `src/`
-    Player source code.
-- `test/`
-    Player test code.
-- `client/`
-    Contains the client. The proper executable can be found in this folder (don't move this!)
-- `build/`
-    Contains compiled player code and other artifacts of the build process. Can be safely ignored.
-- `matches/`
-    The output folder for match files.
-- `maps/`
-    The default folder for custom maps.
-- `gradlew`, `gradlew.bat`
-    The Unix (OS X/Linux) and Windows versions, respectively, of the Gradle wrapper. These are nifty scripts that you can execute in a terminal to run the Gradle build tasks of this project. If you aren't planning to do command line development, these can be safely ignored.
-- `gradle/`
-    Contains files used by the Gradle wrapper scripts. Can be safely ignored.
+### `alternative_bots_1` — Paint-First Aggressive Expansion
+Counter-bot yang memaksimalkan luas area cat tim per ronde dengan SRP 4x4 grid (`srpUseSecondary(x%4, y%4)`) untuk bonus resource 3x. Soldier paint ulang tile musuh (bukan hanya tile kosong) dan memiliki mekanisme nge-sabotage ruin lawan. Upgrade tower lebih awal (L2@150, L3@300). Spawn cycle: SOL-SOL-MOP-SOL-SOL-SPL (index % 6).
 
-### How to get started
+### `alternative_bots_2` — Nearest-First Minimalist
+Strategi greedy paling sederhana, setiap unit selalu milih target terdekat tanpa komunikasi, tanpa SRP, dan tanpa mopper. Soldier mencari ruin terdekat, splasher bergerak ke area non-ally terbanyak. Spawn 50:50 soldier:splasher. Tipe tower deterministik berdasarkan posisi ruin `(x+y)%3`.
 
-You are free to directly edit `examplefuncsplayer`.
-However, we recommend you make a new bot by copying `examplefuncsplayer` to a new package under the `src` folder.
+## Requirements
 
-### Useful Commands
+- Java 21 atau lebih tinggi
+- Gradle 8.10 (sudah termasuk via Gradle Wrapper)
 
-- `./gradlew build`
-    Compiles your player
-- `./gradlew run`
-    Runs a game with the settings in gradle.properties
-- `./gradlew update`
-    Update configurations for the latest version -- run this often
-- `./gradlew zipForSubmit`
-    Create a submittable zip file
-- `./gradlew tasks`
-    See what else you can do!
+## How to Build
 
+```bash
+# Clone repo
+git clone https://github.com/ethj0r/Tubes1_-opentowork.git
+cd Tubes1_-opentowork
 
-### Configuration 
+# Build semua bot
+./gradlew build
+```
 
-Look at `gradle.properties` for project-wide configuration.
+## How to Run
 
-If you are having any problems with the default client, please report to teh devs and
-feel free to set the `compatibilityClient` configuration to `true` to download a different version of the client.
+```bash
+# run match antara dua bot
+./gradlew run -PteamA=main_bot -PteamB=alternative_bots_1 -Pmaps=DefaultSmall
+
+# e.g., match lainnya
+./gradlew run -PteamA=main_bot -PteamB=alternative_bots_2 -Pmaps=DefaultSmall
+./gradlew run -PteamA=alternative_bots_1 -PteamB=alternative_bots_2 -Pmaps=DefaultSmall
+
+# mau run pake client?
+# open Battlecode Client, or
+./gradlew client
+```
+
+Replay file tersimpan di folder `matches/`.
+
+```bash
+# List semua bot yang tersedia
+./gradlew listPlayers
+
+# List semua map yang tersedia
+./gradlew listMaps
+```
+
+## Author
+
+13524020 Stevanus Agustaf Wongso
+13524026 Made Branenda Jordhy
+13524114 Mirza Tsabita Wafa’ana
